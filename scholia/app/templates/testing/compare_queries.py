@@ -9,19 +9,19 @@ QLEVER_API_URL = "https://qlever.dev/api/wikidata?query="
 WQS_API_URL = "https://query.wikidata.org/sparql"
 
 
-#WIKIDATA_ENTITIES = ['Q17714', 'Q60025', 'Q937', 'Q6527', 'Q45321', 'Q3086447']  # stephen hawkings, hannah arendt, albert einstein, jean-jacques rousseau, harald lesch, francoise combes
-WIKIDATA_ENTITIES = ['Q15978631', 'Q25265']  # homo sapiens, felidae
-FILES = ["query_wqs.sparql", "query_qlever.sparql"]
+def print_differences(wqs, qlever, ignore_label=False):
+  if len(wqs) > 0:
+    entity = wqs[0]['entity']
+  else:
+    entity = qlever[0]['entity']
 
-def print_differences(wqs, qlever):
-
-  print(f"Timings on entity {wqs[0]['entity']}:         ")
+  print(f"Timings on entity {entity}:         ")
   for res in wqs:
     print(f"\t{res['template_name']} (WQS): \t{str(res['response_time'])[:6]}")
   for res in qlever:
     print(f"\t{res['template_name']} (Qlever): \t{str(res['response_time'])[:6]}")
   
-  print(f"Magnitudes on entity {wqs[0]['entity']}:")
+  print(f"Magnitudes on entity {entity}:")
   for res in wqs:
     try:
       res['results'] = res['response_content']['results']
@@ -42,10 +42,12 @@ def print_differences(wqs, qlever):
   res_1_name, res_2_name = res_1['template_name'], res_2['template_name']
   try:
     # drop color and label data for comparison
-    # res_1 = [{k: v for k, v in row.items() if k != "rgb" and not k.endswith("Label")} for row in res_1["response_content"]["results"]]
-    # res_2 = [{k: v for k, v in row.items() if k != "rgb" and not k.endswith("Label")} for row in res_2["response_content"]["results"]]
-    res_1 = [{k: v for k, v in row.items() if not k.endswith("Label")} for row in res_1["response_content"]["results"]]
-    res_2 = [{k: v for k, v in row.items() if not k.endswith("Label")} for row in res_2["response_content"]["results"]]
+    if ignore_label:
+      res_1 = [{k: v for k, v in row.items() if k!= "rgb"} for row in res_1["response_content"]["results"]]
+      res_2 = [{k: v for k, v in row.items() if k!= "rgb"} for row in res_2["response_content"]["results"]]
+    else:
+      res_1 = [{k: v for k, v in row.items() if k != "rgb" and not k.endswith("Label")} for row in res_1["response_content"]["results"]]
+      res_2 = [{k: v for k, v in row.items() if k != "rgb" and not k.endswith("Label")} for row in res_2["response_content"]["results"]]
   except:
     raise RuntimeError("Results don't include data. Probably connection or server issue. Please try again.")
 
@@ -59,11 +61,15 @@ def print_differences(wqs, qlever):
     print("\n\t".join(divergent_elements))
 
 def parse_cli_args():
-  parser = argparse.ArgumentParser(description='Compare SPARQL templates for Wikidata entities running on different backends.')
+  parser = argparse.ArgumentParser(description=
+    'Compare SPARQL templates for Wikidata entities running on different backends. \
+    Compares line by line results if 2 templates are given, otherwise it only compares runtimes and magnitudes of returned results')
   parser.add_argument('--qids', type=str, nargs='+', required=True, 
                       help='Qids of wikidata entities, that will be used to compare the queries')
   parser.add_argument('--print-query', action='store_true',
                       help='Prints the queries before executing them.')
+  parser.add_argument('--ignore-label', action='store_true',
+                      help='Ignores differences in the labels.')
   parser.add_argument('--qlever', type=str, nargs='+',
                       help='run these templates with qlever and compare them against all other templates (qlever- or wqs-run)')
   parser.add_argument('--wqs', type=str, nargs='+',
@@ -78,6 +84,7 @@ if __name__ == "__main__":
   qlever_templates = args.qlever if args.qlever is not None else []
   wqs_templates = args.wqs if args.wqs is not None else []
   print_query = args.print_query
+  ignore_label = args.ignore_label
 
   if len(qlever_templates) + len(wqs_templates) == 0:
     raise RuntimeError("No templates to compare provided. Add them with either --qlever or --wqs depending on how you want them to be run.")
@@ -95,8 +102,8 @@ if __name__ == "__main__":
     
     qlever_results = []
     for i, (template_name, template) in enumerate(qlever_templates):
-      print(f"Waiting on request {i+len(wqs_results)} (Qlever) ...     ", end='\r')
+      print(f"Waiting on request {i+len(wqs_results)+1} (Qlever) ...     ", end='\r')
       # get results of query from qlever api
       qlever_results.append(run_template(template_name, template, wikidata_entity, print_query=print_query, url=QLEVER_API_URL))
 
-    print_differences(wqs_results, qlever_results)
+    print_differences(wqs_results, qlever_results, ignore_label=ignore_label)
