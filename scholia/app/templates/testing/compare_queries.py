@@ -43,11 +43,11 @@ def print_differences(wqs, qlever, ignore_label=False):
   try:
     # drop color and label data for comparison
     if ignore_label:
-      res_1 = [{k: v for k, v in row.items() if k!= "rgb"} for row in res_1["response_content"]["results"]]
-      res_2 = [{k: v for k, v in row.items() if k!= "rgb"} for row in res_2["response_content"]["results"]]
-    else:
       res_1 = [{k: v for k, v in row.items() if k != "rgb" and not k.endswith("Label")} for row in res_1["response_content"]["results"]]
       res_2 = [{k: v for k, v in row.items() if k != "rgb" and not k.endswith("Label")} for row in res_2["response_content"]["results"]]
+    else:
+      res_1 = [{k: v for k, v in row.items() if k!= "rgb"} for row in res_1["response_content"]["results"]]
+      res_2 = [{k: v for k, v in row.items() if k!= "rgb"} for row in res_2["response_content"]["results"]]
   except:
     raise RuntimeError("Results don't include data. Probably connection or server issue. Please try again.")
 

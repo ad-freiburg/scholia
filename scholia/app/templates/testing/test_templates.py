@@ -24,20 +24,12 @@ PICKLE_FNAME = FILE_BASENAME + ".pkl"
 # the path from this script to the template directory
 RELATIVE_PATH_TO_TEMPLATE_DIR = ("..", "..", "templates")
 
-### various templates that should not be run, for different reasons
-# don't run this because qlever engine crashes
-TEMPLATE_EXCEPTIONS_CRASH = ["event_related-events-people.sparql"]
-# don't run these because the result is so big it crashes the script (on my machine). I assume there is not enough RAM.
-# I have tested these individually and they run as expected
-TEMPLATE_EXCEPTIONS_RESULT_TO_BIG = ["organizations_list.sparql", "location-topic_nearby-researchers.sparql", "authors_works-per-publication-year.sparql", "authors_list-of-authors.sparql", "authors_list-of-jointly-authored-works.sparql"]
-
-TEMPLATE_EXCEPTIONS = TEMPLATE_EXCEPTIONS_CRASH + TEMPLATE_EXCEPTIONS_RESULT_TO_BIG
-
 # URLs for API calls
 QLEVER_API_URL = "https://qlever.dev/api/wikidata?query="
 WQS_API_URL = "https://query.wikidata.org/sparql"
 
-QLEVER_CALL = ["curl", "-s", "localhost:7001", "--data-urlencode", "query="]
+################################# change port here >  <
+QLEVER_CALL = ["curl", "-s", "host.docker.internal:7001", "--data-urlencode", "query="]
 
 
 def load_df():
@@ -78,20 +70,18 @@ def read_templates_from_template_dir():
   path_to_template_dir = os.path.join(os.getcwd(), *RELATIVE_PATH_TO_TEMPLATE_DIR)
 
   files = os.listdir(path_to_template_dir)
-  files = [os.path.join(*RELATIVE_PATH_TO_TEMPLATE_DIR, fname) for fname in files]
-  
+
   # filter out all non-sparql files
   sparql_files = filter(lambda file: file.endswith(".sparql"), files)
   
   return read_sparql_templates(sparql_files)
 
 def read_sparql_templates(fnames):
-  fnames = [os.path.join(os.getcwd(), fname) for fname in fnames]
-    
-  # read each file and yield its content
+  path_to_template_dir = os.path.join(os.getcwd(), *RELATIVE_PATH_TO_TEMPLATE_DIR)
   for fname in fnames:
+    fpath = os.path.join(path_to_template_dir, fname)
     try:
-      with open(fname, 'r', encoding='utf-8') as f:
+      with open(fpath, 'r', encoding='utf-8') as f:
         content = f.read().strip()
         yield (fname, content)
     except IOError as e:
@@ -126,7 +116,8 @@ def get_response_https(query: str, url: str=QLEVER_API_URL):
   """ prompts the API to get the response from the query """
   start = time.perf_counter()
   if url == QLEVER_API_URL:
-    response_decoded = requests.get(url + quote(query)).json()
+    response = requests.get(url + quote(query))
+    response_decoded = response.json()
   elif url == WQS_API_URL:
     response_decoded = get_response_wqs(url, query)
   end = time.perf_counter()
@@ -144,7 +135,7 @@ def get_response_local(query: str):
 
   return response_decoded, elapsed
 
-def should_skip_template(df, entity, template_name, overwrite_all, overwrite_error, overwrite_success, cli_templates):
+def should_skip_template(df, entity, template_name, overwrite_all, overwrite_error, overwrite_success, cli_templates, exceptions):
   """
     Check if template should be skipped 
     - if its already in the df and overwrite_all is false
@@ -154,10 +145,10 @@ def should_skip_template(df, entity, template_name, overwrite_all, overwrite_err
   # don't skip templates, that have been explicitly passed as a CLI arguments
   # if templates have been explicitly passed skip all others
   if cli_templates is not None:
-    return False if template_name in cli_templates else True
+    return False if template_name.split("/")[-1] in cli_templates else True
 
-  if template_name in TEMPLATE_EXCEPTIONS:
-    return True
+  if exceptions is not None: 
+    return True if template_name.split("/")[-1] in exceptions else False
   
   if overwrite_all or df.empty:
     return False
@@ -228,10 +219,17 @@ def run_template(template_name, template, entity, print_query=False, url="", res
   query = insert_wikidata_entity(template, entity)
   if print_query:
     print(query)
+  #try:
   if url != "":
     response, response_time = get_response_https(query, url)
   else:
     response, response_time = get_response_local(query)
+  # except Exception as e:
+  #   if e == KeyboardInterrupt:
+  #     raise KeyboardInterrupt()
+  #   print("Couldn't get a result from the query! Either the server could not be reached or the reply couldn't be decoded in json format.")
+  #   response = {"exception": "Couldn't fetch result"}
+  #   response_time = -1
   return filter_response(response, response_time, entity, template_name, result_limit)
 
 def update_df(df, result_dict):
@@ -248,7 +246,10 @@ def update_df(df, result_dict):
   return df
 
 def parse_cli_args():
-  parser = argparse.ArgumentParser(description='Test scholias SPARQL templates against Wikidata entities')
+  parser = argparse.ArgumentParser(description=
+    'Test scholias SPARQL templates against Wikidata entities. \
+    By default this script expects a local qlever server at localhost:7001.\
+    The options --use-qlever-api or --use-wqs-api will instead prompt the official qlever/wqs instance.')
   parser.add_argument('--entity', type=str, default="Q18618629", 
                       help='Wikidata entity (default: Q18618629 - Denny Vrandecic)')
   parser.add_argument('--print-only', action='store_true',
@@ -257,6 +258,8 @@ def parse_cli_args():
                       help='Prints the query given to qlever before executing it.')
   parser.add_argument('--template', type=str, nargs='+', default=None,
                       help='tests only the given template(s)')
+  parser.add_argument('--exceptions', type=str, nargs='+', default=None,
+                      help='omits the given template(s) from the tests')
   parser.add_argument('--overwrite-all', action='store_true',
                       help='Overwrite saved results for this entity instead of skipping')
   parser.add_argument('--overwrite-error', action='store_true',
@@ -278,6 +281,7 @@ if __name__ == "__main__":
   args = parse_cli_args()
   wikidata_entity = args.entity
   cli_templates = args.template
+  exceptions = args.exceptions
   print_query = args.print_query
   overwrite_all = args.overwrite_all
   overwrite_error = args.overwrite_error
@@ -308,7 +312,7 @@ if __name__ == "__main__":
 
   # skip already saved templates
   templates = list(read_templates_from_template_dir())
-  templates_to_process = [t for t in templates if not should_skip_template(df, wikidata_entity, t[0], overwrite_all, overwrite_error, overwrite_success, cli_templates)]
+  templates_to_process = [t for t in templates if not should_skip_template(df, wikidata_entity, t[0], overwrite_all, overwrite_error, overwrite_success, cli_templates, exceptions)]
 
   # print how many skipped how many to go
   skipped = len(templates) - len(templates_to_process)
