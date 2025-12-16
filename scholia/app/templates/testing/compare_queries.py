@@ -51,13 +51,13 @@ def print_differences(wqs, qlever, ignore_label=False):
   except:
     raise RuntimeError("Results don't include data. Probably connection or server issue. Please try again.")
 
-  divergent_elements = list([str(elem) for elem in res_1 if elem not in res_2])
+  divergent_elements = list([str(elem) for elem in res_1 if elem not in res_2])[:10]
   if divergent_elements != []:
-    print(f"Results from {res_1_name}, that were not returned from {res_2_name} for entity {wqs[0]['entity']}:", end="\n\t")
+    print(f"Results from {res_1_name}, that were not returned from {res_2_name} for entity {wqs[0]['entity']} (limited to 10 results):", end="\n\t")
     print("\n\t".join(divergent_elements))
-  divergent_elements = list([str(elem) for elem in res_2 if elem not in res_1])
+  divergent_elements = list([str(elem) for elem in res_2 if elem not in res_1])[:10]
   if divergent_elements != []:
-    print(f"Results from {res_2_name}, that were not returned from {res_1_name} for entity {wqs[0]['entity']}:", end="\n\t")
+    print(f"Results from {res_2_name}, that were not returned from {res_1_name} for entity {wqs[0]['entity']} (limited to 10 results):", end="\n\t")
     print("\n\t".join(divergent_elements))
 
 def parse_cli_args():

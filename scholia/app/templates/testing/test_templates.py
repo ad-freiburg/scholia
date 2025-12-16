@@ -11,7 +11,7 @@ from urllib.parse import quote
 import subprocess
 from SPARQLWrapper import SPARQLWrapper, JSON # for prompting wqs api
 
-from jinja2 import Template  # for replacing placeholders in templates
+from jinja2 import Environment, FileSystemLoader
 import datetime  # also for placeholders
 import pandas as pd  # for storing results
 import json  # for reading the api results
@@ -89,17 +89,21 @@ def read_sparql_templates(fnames):
 
 def insert_wikidata_entity(template: str, entity: str):
   """ uses jinja2 replacement to generate a valid query from a template by filling in the entity """
-  # Create a Jinja2 Template object from the template as a string
-  jinja_template = Template(template)
+  env = Environment(
+      loader=FileSystemLoader(os.path.join(os.getcwd(), *RELATIVE_PATH_TO_TEMPLATE_DIR)),  # directory containing sparql-helpers.sparql
+      autoescape=False
+  )
 
-  # Replace all jinja2 placeholders with the following QIDS
-  out = jinja_template.render(
+  template = env.from_string(template)
+
+  out = template.render(
       q=entity,      # replaces {{q}} placeholders
       q1=entity,     # replaces {{q1}} placeholders
       q2=entity,     # replaces {{q2}} placeholders
       q3=entity,     # replaces {{q3}} placeholders
       q4=entity,     # replaces {{q4}} placeholders
       qs=[entity],   # replaces {% for q in qs %} placeholders
+      languages=["en", "mul"],
       datetime=datetime
   )
   return out
