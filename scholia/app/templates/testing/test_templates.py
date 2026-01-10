@@ -3,7 +3,7 @@
 # imports for system and file operations
 import os
 import sys
-import pickle  # for saving results
+import pickle
 
 # imports for api request
 import requests
@@ -11,12 +11,13 @@ from urllib.parse import quote
 import subprocess
 from SPARQLWrapper import SPARQLWrapper, JSON # for prompting wqs api
 
-from jinja2 import Environment, FileSystemLoader
+from jinja2 import Environment, FileSystemLoader  # placeholder replacement
 import datetime  # also for placeholders
-import pandas as pd  # for storing results
-import json  # for reading the api results
-import argparse  # argument parsing
-import time  # for timer
+import pandas as pd
+import json
+import argparse
+import time 
+import tempfile
 
 # file to save the results to
 FILE_BASENAME = "wikidata_results"  
@@ -24,12 +25,67 @@ PICKLE_FNAME = FILE_BASENAME + ".pkl"
 # the path from this script to the template directory
 RELATIVE_PATH_TO_TEMPLATE_DIR = ("..", "..", "templates")
 
+
 # URLs for API calls
 QLEVER_API_URL = "https://qlever.dev/api/wikidata?query="
 WQS_API_URL = "https://query.wikidata.org/sparql"
 
-################################# change port here >  <
-QLEVER_CALL = ["curl", "-s", "host.docker.internal:7001", "--data-urlencode", "query="]
+# subprocess call in parts (<port> will be replaced with given port)
+QLEVER_CALL = ["curl", "-s", "<port>", "--data-urlencode", "query="]
+
+# internal entity/QID dict
+ENTITIES = {
+  "author": ["Q2399315"],
+  "authors": ["Q20980928", "Q24290415", "Q24390693", "Q26720269"],
+  "award": ["Q18357422", "Q37922"],
+  "catalogue": ["Q51467536"],
+  "chemical": ["Q159683"],
+  "chemical-class": ["Q41581"],
+  "chemical-element": ["Q623"],
+  "cito": ["Q96479983"],
+  "clinical-trial": ["Q64650701"],
+  "complex": ["Q409796"],
+  "country": ["Q142"],
+  "countries": ["Q114", "Q258", "Q1036", "Q954", "Q1013", "Q963", "Q1030", "Q953"],
+  "dataset": ["Q69644056"],
+  "disease": ["Q41112"],
+  "event": ["Q56579271"],
+  "event-series": ["Q105695391"],
+  "gene": ["Q18030793"],
+  "language": ["Q1860"],
+  "lexeme": ["L1473010"],
+  "license": ["Q14947546"],
+  "location": ["Q791", "Q1748"],
+  "mesh": ["D028441"],
+  "ontology": ["Q55118285"],
+  "organization": ["Q19375720", "Q835960"],
+  "organizations": ["Q24283660", "Q19845644"],
+  "pathway": ["Q50294491"],
+  "podcast": ["Q124363332"],
+  "podcast-episode": ["Q67590634"],
+  "podcast-season": ["Q69152103"],
+  "printer": ["Q118455415"],
+  "project": ["Q27949537"],
+  "protein": ["Q21109365"],
+  "publisher": ["Q5168538", "Q118455415"],
+  "series": ["Q924044"],
+  "software": ["Q1659584", "Q5140318"],
+  "sponsor": ["Q1377836"],
+  "taxon": ["Q25485"],
+  "topic": ["Q202864"],
+  "topics": [
+    "Q202864", "Q5227350", "Q2539", "Q18972821", "Q18970437",
+    "Q18970321", "Q18970360", "Q18972580", "Q18972329",
+    "Q184199", "Q19049584"
+  ],
+  "use": ["Q1659584"],
+  "uses": ["Q1659584", "Q112270642"],
+  "venue": ["Q939416"],
+  "venues": ["Q15751424", "Q15757725", "Q15751497"],
+  "wikiproject": ["Q114364300"],
+  "work": ["Q27932040"],
+  "works": ["Q24699014", "Q27230311"]
+}
 
 
 def load_df():
@@ -37,7 +93,6 @@ def load_df():
   if os.path.exists(PICKLE_FNAME):
     with open(PICKLE_FNAME, 'rb') as f:
       df = pickle.load(f)
-    print(f"Loaded existing df\r", end="")
     return df
   else:
     return None
@@ -63,7 +118,6 @@ def save_df(df, fname=None):
     os.fsync(f.fileno())  # Force OS to write data to disk
   
   os.replace(fname_tmp, fname)
-  print("Saved df\r", end="")
 
 def read_templates_from_template_dir():
   """ yields the filename and file content of scholia's sparql templates """
@@ -87,8 +141,8 @@ def read_sparql_templates(fnames):
     except IOError as e:
       print(f"Error reading file {fname}: {e}", file=sys.stderr)
 
-def insert_wikidata_entity(template: str, entity: str):
-  """ uses jinja2 replacement to generate a valid query from a template by filling in the entity """
+def insert_wikidata_entity(template: str, entities: list[str]):
+  """ uses jinja2 replacement to generate a valid query from a template by filling in the entities, languages and datetime """
   env = Environment(
       loader=FileSystemLoader(os.path.join(os.getcwd(), *RELATIVE_PATH_TO_TEMPLATE_DIR)),  # directory containing sparql-helpers.sparql
       autoescape=False
@@ -96,17 +150,50 @@ def insert_wikidata_entity(template: str, entity: str):
 
   template = env.from_string(template)
 
+  def get_entity(entities, pos):
+    """ get entity at pos safely """
+    if pos < len(entities):
+      return entities[pos]
+    else:
+      return entities[0]
+
   out = template.render(
-      q=entity,      # replaces {{q}} placeholders
-      q1=entity,     # replaces {{q1}} placeholders
-      q2=entity,     # replaces {{q2}} placeholders
-      q3=entity,     # replaces {{q3}} placeholders
-      q4=entity,     # replaces {{q4}} placeholders
-      qs=[entity],   # replaces {% for q in qs %} placeholders
+      q=entities[0],              # replaces {{q}} placeholders
+      q1=entities[0],             # replaces {{q1}} placeholders
+      q2=get_entity(entities, 1), # replaces {{q2}} placeholders
+      q3=get_entity(entities, 2), # replaces {{q3}} placeholders
+      q4=get_entity(entities, 3), # replaces {{q4}} placeholders
+      qs=entities,                # replaces {% for q in qs %} placeholders
       languages=["en", "mul"],
       datetime=datetime
   )
   return out
+
+def safe_decode_of_tmpfile(tmp):  
+  """ 
+  decode the answer only if enough memory is available
+  if the answer is too large, it means qlever successfully returned a result and didn't fail
+  """
+  tmp.flush()
+  file_size = os.path.getsize(tmp.name)
+
+  available_ram = available_ram_bytes()
+
+  if available_ram is not None:
+    # the amount of memory needed will be larger than the filesize, also the amount of available memory might fluctuate
+    estimated_needed = int(file_size * 50)
+    if estimated_needed > available_ram:
+      print("Answer too large to decode safely. ", end="")
+      return { 
+          "status": "too_large",
+          "file_size_bytes": file_size,
+          "estimated_needed_bytes": estimated_needed,
+          "available_ram_bytes": available_ram,
+        }
+
+    tmp.seek(0)
+    response_decoded = json.load(tmp)
+    return response_decoded
 
 def get_response_wqs(endpoint_url, query):
   """ function provided by wqs to prompt wqs """
@@ -119,82 +206,112 @@ def get_response_wqs(endpoint_url, query):
 def get_response_https(query: str, url: str=QLEVER_API_URL):
   """ prompts the API to get the response from the query """
   start = time.perf_counter()
+  ### qlever api
   if url == QLEVER_API_URL:
-    response = requests.get(url + quote(query))
-    response_decoded = response.json()
+    with tempfile.NamedTemporaryFile(mode="wb+") as tmp:
+      with requests.get(url + quote(query), stream=True) as r:
+        r.raise_for_status()
+        for chunk in r.iter_content(chunk_size=1024 * 1024):
+          if chunk:
+            tmp.write(chunk)
+      end = time.perf_counter()
+      elapsed = end - start
+      print("...", end="")
+      response_decoded = safe_decode_of_tmpfile(tmp)
+  ### wqs api
   elif url == WQS_API_URL:
     response_decoded = get_response_wqs(url, query)
-  end = time.perf_counter()
-  elapsed = end - start
+    # it would be best to also stream the response to a tmpfile
+    # and safely decode it later, but I haven't figured that out yet
+    end = time.perf_counter()
+    elapsed = end - start
   return response_decoded, elapsed
 
-def get_response_local(query: str):
-  """ prompts local (running) qlever server to get a response from the query """
+def available_ram_bytes():
+  """ estimates amount of RAM available to process """
+  if hasattr(os, "sysconf"):
+      try:
+          page_size = os.sysconf("SC_PAGE_SIZE")
+          available_pages = os.sysconf("SC_AVPHYS_PAGES")
+          return page_size * available_pages
+      except (ValueError, OSError):
+          pass
+  return None
+
+def get_response_local(query: str, port: str):
+  """ prompts local running qlever server at @port to get a response from the @query """
   qlever_call = QLEVER_CALL[:-1] + [QLEVER_CALL[-1] + query]
+  qlever_call = map(lambda x: port if x == "<port>" else x, qlever_call)
   start = time.perf_counter()
-  response = subprocess.check_output(qlever_call)
-  response_decoded = json.loads(response.decode("utf-8"))
-  end = time.perf_counter()
-  elapsed = end - start
+  with tempfile.NamedTemporaryFile(mode="w+", suffix=".json") as tmp:
+    subprocess.run(
+        qlever_call,
+        stdout=tmp,
+        stderr=subprocess.PIPE,
+        check=True
+    )
+    end = time.perf_counter()
+    elapsed = end - start
+    response_decoded = safe_decode_of_tmpfile(tmp)
 
   return response_decoded, elapsed
 
-def should_skip_template(df, entity, template_name, overwrite_all, overwrite_error, overwrite_success, cli_templates, exceptions):
-  """
-    Check if template should be skipped 
-    - if its already in the df and overwrite_all is false
-    - if overwrite_error is true and status is "succes"
-    - if overwrite_succes is true and status is not "succes"
-  """
+def should_skip_template(df, entities, template_name, overwrite_all, overwrite_error, overwrite_success, cli_templates, exceptions):
+  """ Check if template should be skipped """
   # don't skip templates, that have been explicitly passed as a CLI arguments
   # if templates have been explicitly passed skip all others
   if cli_templates is not None:
     return False if template_name.split("/")[-1] in cli_templates else True
 
   if exceptions is not None: 
-    return True if template_name.split("/")[-1] in exceptions else False
+    if template_name.split("/")[-1] in exceptions:
+      return True 
   
   if overwrite_all or df.empty:
     return False
   
-  mask = (df['entity'] == entity) & (df['template_name'] == template_name)
+  mask = (df['entities'] == ", ".join(map(str, entities))) & (df['template_name'] == template_name)
   if overwrite_error:
     mask = mask & (df['status'] == 'success')
   if overwrite_success:
     mask = mask & (df['status'] != 'success')
   return mask.any()
 
-def print_results(df, entity):
-  """ Print results for a specific entity """
-  entity_data = df[df['entity'] == entity] if 'entity' in df.columns else df
-  
-  if len(entity_data) == 0:
-    print(f"No data for entity {entity}")
-    return
-  
-  print(f"\nResults for {entity}:")
-  print(entity_data['status'].value_counts())
-  print(f"\nTotal: {len(entity_data)}")
+def find_suitable_entities(template_name):
+  """ truncate template_name, and find associated entities in internal dict """
+  # truncation ex: software-curation_missing-describes-use.sparql >>> software-curation
+  template_type = template_name.split("_")[0]
+  entities = ENTITIES.get(template_type, None)
+  if entities is None:
+    # more general truncation, if the specic version didnt return anything 
+    # ex: software-curation >>> software
+    template_type = template_type.split("-")[0]
+    entities = ENTITIES.get(template_type, None)
+    if entities is None:
+      # only warn because there is templates where None is fine, because they dont need to replace any qids
+      print(f"WARNING: No suitable entity in internal dictionairy for template: {template_name}!")
+      entities = [None]
+  return entities
+
+def print_results(df):
+  """ Print results """
+  print(df['status'].value_counts())
+  print(f"\nTotal: {len(df)}")
   pd.set_option('display.max_rows', None)
   print(df)
 
-def df_to_dict(df, wikidata_entity=None):
-  """ Turn all entries belonging to a given entity (QID) to a dict index by template_name """
-  if wikidata_entity is not None:
-    df = df[df['entity'] == wikidata_entity]
-    
+def df_to_dict(df):
+  """ Turn df into dict indexed by template_name """    
   result = {}
   for _, row in df.iterrows():
     template_name = row['template_name']
-    # Get all columns except 'entity' and 'template_name'
-    row = row.drop(['entity', 'template_name'])
+    row = row.drop(['template_name'])
     data = row.to_dict()
     result[template_name] = data
-  
   return result
 
-def filter_response(response_content, response_time, entity, template_name, result_limit=-1):
-  """ decodes and removes all unwanted information from the response """  
+def filter_response(response_content, response_time, entities, template_name, result_limit=-1):
+  """ removes all unwanted information from the response and puts it into the correct format to save it """  
   status = "error" if "exception" in response_content.keys() else "success" 
   results = response_content.pop('results', None)
   if results is not None:
@@ -210,7 +327,7 @@ def filter_response(response_content, response_time, entity, template_name, resu
   
   # result data, that will be saved
   result_dict = {
-  'entity': entity,
+  'entities': ", ".join(map(str, entities)),
   'template_name': template_name,
   'status': status,
   'response_time': response_time,
@@ -218,29 +335,22 @@ def filter_response(response_content, response_time, entity, template_name, resu
   }
   return result_dict
 
-def run_template(template_name, template, entity, print_query=False, url="", result_limit=-1):
+def run_template(template_name, template, entities, port, print_query=False, url="", result_limit=-1):
   """ insert wikidata entity in template and prompt a service, then return the filtered result """
-  query = insert_wikidata_entity(template, entity)
+  query = insert_wikidata_entity(template, entities)
   if print_query:
     print(query)
-  #try:
   if url != "":
     response, response_time = get_response_https(query, url)
   else:
-    response, response_time = get_response_local(query)
-  # except Exception as e:
-  #   if e == KeyboardInterrupt:
-  #     raise KeyboardInterrupt()
-  #   print("Couldn't get a result from the query! Either the server could not be reached or the reply couldn't be decoded in json format.")
-  #   response = {"exception": "Couldn't fetch result"}
-  #   response_time = -1
-  return filter_response(response, response_time, entity, template_name, result_limit)
+    response, response_time = get_response_local(query, port)
+  return filter_response(response, response_time, entities, template_name, result_limit)
 
 def update_df(df, result_dict):
   """ update the dataframe with a result from a single template """
-  # remove old entry (only if overwrite is true)
+  # remove old entry
   if not df.empty:
-    mask = (df['entity'] == result_dict['entity']) & (df['template_name'] == result_dict['template_name'])
+    mask = (df['entities'] == result_dict['entities']) & (df['template_name'] == result_dict['template_name'])
     if mask.any():
       df.drop(df[mask].index, inplace=True)
     
@@ -252,15 +362,15 @@ def update_df(df, result_dict):
 def parse_cli_args():
   parser = argparse.ArgumentParser(description=
     'Test scholias SPARQL templates against Wikidata entities. \
-    By default this script expects a local qlever server at localhost:7001.\
+    By default this script expects a local qlever server at host.docker.internal:7001.\
     The options --use-qlever-api or --use-wqs-api will instead prompt the official qlever/wqs instance.')
-  parser.add_argument('--entity', type=str, default="Q18618629", 
-                      help='Wikidata entity (default: Q18618629 - Denny Vrandecic)')
-  parser.add_argument('--print-only', action='store_true',
+  parser.add_argument('--entities', type=str, default=None, nargs="+", 
+                      help='Wikidata entity (default: will use internal dict to find a qid that returns a non-empty result)')
+  parser.add_argument('--print-results', action='store_true',
                       help='Just prints the saved results, without testing any templates')
   parser.add_argument('--print-query', action='store_true',
-                      help='Prints the query given to qlever before executing it.')
-  parser.add_argument('--template', type=str, nargs='+', default=None,
+                      help='Prints any query before executing it.')
+  parser.add_argument('--templates', type=str, nargs='+', default=None,
                       help='tests only the given template(s)')
   parser.add_argument('--exceptions', type=str, nargs='+', default=None,
                       help='omits the given template(s) from the tests')
@@ -276,6 +386,8 @@ def parse_cli_args():
                       help='Prompt the qlever api via https instead of the locally running qlever server.')
   parser.add_argument('--use-wqs-api', action='store_true',
                       help='Prompt the wqs api via https instead of the locally running qlever server.')
+  parser.add_argument('--port', type=str, default="host.docker.internal:7001",
+                      help='Port where the script can reach a running instance of qlever.')
   
   return parser.parse_args()
 
@@ -283,13 +395,14 @@ def parse_cli_args():
 if __name__ == "__main__":
   # cli parsing
   args = parse_cli_args()
-  wikidata_entity = args.entity
-  cli_templates = args.template
+  entities = args.entities
+  cli_templates = args.templates
   exceptions = args.exceptions
   print_query = args.print_query
   overwrite_all = args.overwrite_all
   overwrite_error = args.overwrite_error
   overwrite_success = args.overwrite_success
+  port = args.port
   if args.use_qlever_api:
     url = QLEVER_API_URL 
   elif args.use_wqs_api:
@@ -297,42 +410,39 @@ if __name__ == "__main__":
   else:
      url = ""
 
-  # loading df
+  # load previously saved data
   df = load_or_create_df()
 
-  if args.print_only:
-    print_results(df, wikidata_entity)
+  # print results and quit
+  if args.print_results:
+    print_results(df)
     sys.exit(0)
 
+  # print results to json file (more detailed) and quit
   if args.save_as_json:
-    if df.empty or wikidata_entity not in df["entity"].unique():
-      raise RuntimeError(f"DF doesn't contain information on this entity ({wikidata_entity})!")
-    fname = FILE_BASENAME + f"_{wikidata_entity}.json"
+    fname = f"{FILE_BASENAME}.json"
     with open(fname, "w") as f:
-      json.dump(df_to_dict(df, wikidata_entity), f, indent=2)  # , sort_keys=True)
+      json.dump(df_to_dict(df), f, indent=2)
       print(f"Saved information in json format in: {fname}")
     sys.exit(0)
 
-
-  # skip already saved templates
+  # find all templates in template dir
   templates = list(read_templates_from_template_dir())
-  templates_to_process = [t for t in templates if not should_skip_template(df, wikidata_entity, t[0], overwrite_all, overwrite_error, overwrite_success, cli_templates, exceptions)]
 
-  # print how many skipped how many to go
-  skipped = len(templates) - len(templates_to_process)
-  print(f"Skipping {skipped} already processed templates")
-  
-  if templates_to_process == []:
-    print("All templates already processed. Use --overwrite-all or --overwrite-error.")
-  else:
-    print(f"Processing {len(templates_to_process)} templates for entity {wikidata_entity}")
+  for n_processed, (template_name, template) in enumerate(templates):
+    # find proper entities/qids
+    if entities is None:
+      entities = find_suitable_entities(template_name)
 
+    print(f"{n_processed + 1}/{len(templates)}: {template_name} using entities {', '.join(map(str, entities))}. ", end="", flush=True)
+    
+    if should_skip_template(df, entities, template_name, overwrite_all, overwrite_error, overwrite_success, cli_templates, exceptions):
+      print("SKIPPED")
+      continue
 
-  for processed, (template_name, template) in enumerate(templates_to_process):
-    print(f"{processed + 1}/{len(templates_to_process)}: {template_name}", end="\r")
-    result = run_template(template_name, template, wikidata_entity, print_query, url=url, result_limit=1)
+    result = run_template(template_name, template, entities, port, print_query, url=url, result_limit=1)
     df = update_df(df, result)
     save_df(df)
-    print(f"{result['status']}: {template_name}")
+    print(f"{result['status'].upper()}")
 
-  print_results(df, wikidata_entity)
+  print_results(df)
