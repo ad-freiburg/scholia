@@ -33,7 +33,7 @@ WQS_API_URL = "https://query.wikidata.org/sparql"
 # subprocess call in parts (<port> will be replaced with given port)
 QLEVER_CALL = ["curl", "-s", "<port>", "--data-urlencode", "query="]
 
-# internal entity/QID dict
+# internal entity/QID dict that maps a query type to a set of QIDs
 ENTITIES = {
   "author": ["Q2399315"],
   "authors": ["Q20980928", "Q24290415", "Q24390693", "Q26720269"],
@@ -114,8 +114,8 @@ def save_df(df, fname=None):
   
   with open(fname_tmp, 'wb') as f:
     pickle.dump(df, f)
-    f.flush()  # Force Python to write buffered data to OS
-    os.fsync(f.fileno())  # Force OS to write data to disk
+    f.flush()  # Force Python to immediately write buffered data to OS
+    os.fsync(f.fileno())  # Force OS to immediately write data to disk
   
   os.replace(fname_tmp, fname)
 
@@ -151,7 +151,7 @@ def insert_wikidata_entity(template: str, entities: list[str]):
   template = env.from_string(template)
 
   def get_entity(entities, pos):
-    """ get entity at pos safely """
+    """ safely get entity at pos """
     if pos < len(entities):
       return entities[pos]
     else:
@@ -168,6 +168,66 @@ def insert_wikidata_entity(template: str, entities: list[str]):
       datetime=datetime
   )
   return out
+
+def get_response_wqs(endpoint_url, query):
+  """ function provided by wqs to prompt wqs """
+  user_agent = "WDQS-example Python/%s.%s" % (sys.version_info[0], sys.version_info[1])
+  sparql = SPARQLWrapper(endpoint_url, agent=user_agent)
+  sparql.setQuery(query)
+  sparql.setReturnFormat(JSON)
+  return sparql.query().convert()
+
+def get_response_from_endpoint(query: str, port: str, url: str):
+  """ prompts the API to get the response from the query """
+  start = time.perf_counter()
+  ### wqs endpoint
+  if url == WQS_API_URL:
+    response_decoded = get_response_wqs(url, query)
+    # it would be best to also stream the response to a tmpfile
+    # and safely decode it later, but the api functionality provided by wqs doesn't allow me to do it the same way
+    end = time.perf_counter()
+  ### qlever and other endpoints
+  elif url != "":
+      response_decoded = safely_fetch_response(query, url)
+      end = time.perf_counter()
+      # response_decoded = safe_decode_of_tmpfile(tmp)
+  ### local qlever endpoint
+  else:
+    qlever_call = QLEVER_CALL[:-1] + [QLEVER_CALL[-1] + query]
+    qlever_call = map(lambda x: port if x == "<port>" else x, qlever_call)
+    with tempfile.NamedTemporaryFile(mode="w+", suffix=".json") as tmp:
+      try:
+        subprocess.run(
+            qlever_call,
+            stdout=tmp,
+            stderr=subprocess.PIPE,
+            check=True
+        )
+      except Exception:
+        raise RuntimeError(f"Not possible to fetch result from local endpoint at port {port}! Are you sure the endpoint is up?")
+      end = time.perf_counter()
+      response_decoded = safe_decode_of_tmpfile(tmp)
+  
+  elapsed = end - start
+  print("...", end="")
+  return response_decoded, elapsed
+
+def safely_fetch_response(query, url):
+  """ fetch the response safely, by streaming it into a tmpfile first and then decoding it """
+  # print("\n"*10)
+  # print(query)
+  # print(url)
+  # print("\n"*10)
+  with tempfile.NamedTemporaryFile(mode="wb+") as tmp:
+    try:
+      with requests.get(url + quote(query), stream=True) as r:
+        r.raise_for_status()
+        for chunk in r.iter_content(chunk_size=1024 * 1024):
+          if chunk:
+            tmp.write(chunk)
+    except Exception:
+      raise RuntimeError(f"Not possible to fetch a response from the endpoint at url {url}! Are you sure the endpoint is up?")
+    return safe_decode_of_tmpfile(tmp)
 
 def safe_decode_of_tmpfile(tmp):  
   """ 
@@ -195,38 +255,6 @@ def safe_decode_of_tmpfile(tmp):
     response_decoded = json.load(tmp)
     return response_decoded
 
-def get_response_wqs(endpoint_url, query):
-  """ function provided by wqs to prompt wqs """
-  user_agent = "WDQS-example Python/%s.%s" % (sys.version_info[0], sys.version_info[1])
-  sparql = SPARQLWrapper(endpoint_url, agent=user_agent)
-  sparql.setQuery(query)
-  sparql.setReturnFormat(JSON)
-  return sparql.query().convert()
-
-def get_response_https(query: str, url: str=QLEVER_API_URL):
-  """ prompts the API to get the response from the query """
-  start = time.perf_counter()
-  ### qlever api
-  if url == QLEVER_API_URL:
-    with tempfile.NamedTemporaryFile(mode="wb+") as tmp:
-      with requests.get(url + quote(query), stream=True) as r:
-        r.raise_for_status()
-        for chunk in r.iter_content(chunk_size=1024 * 1024):
-          if chunk:
-            tmp.write(chunk)
-      end = time.perf_counter()
-      elapsed = end - start
-      print("...", end="")
-      response_decoded = safe_decode_of_tmpfile(tmp)
-  ### wqs api
-  elif url == WQS_API_URL:
-    response_decoded = get_response_wqs(url, query)
-    # it would be best to also stream the response to a tmpfile
-    # and safely decode it later, but I haven't figured that out yet
-    end = time.perf_counter()
-    elapsed = end - start
-  return response_decoded, elapsed
-
 def available_ram_bytes():
   """ estimates amount of RAM available to process """
   if hasattr(os, "sysconf"):
@@ -237,24 +265,6 @@ def available_ram_bytes():
       except (ValueError, OSError):
           pass
   return None
-
-def get_response_local(query: str, port: str):
-  """ prompts local running qlever server at @port to get a response from the @query """
-  qlever_call = QLEVER_CALL[:-1] + [QLEVER_CALL[-1] + query]
-  qlever_call = map(lambda x: port if x == "<port>" else x, qlever_call)
-  start = time.perf_counter()
-  with tempfile.NamedTemporaryFile(mode="w+", suffix=".json") as tmp:
-    subprocess.run(
-        qlever_call,
-        stdout=tmp,
-        stderr=subprocess.PIPE,
-        check=True
-    )
-    end = time.perf_counter()
-    elapsed = end - start
-    response_decoded = safe_decode_of_tmpfile(tmp)
-
-  return response_decoded, elapsed
 
 def should_skip_template(df, entities, template_name, overwrite_all, overwrite_error, overwrite_success, cli_templates, exceptions):
   """ Check if template should be skipped """
@@ -335,15 +345,12 @@ def filter_response(response_content, response_time, entities, template_name, re
   }
   return result_dict
 
-def run_template(template_name, template, entities, port, print_query=False, url="", result_limit=-1):
+def run_template(template_name, template, entities, port, url, print_query=False, result_limit=-1):
   """ insert wikidata entity in template and prompt a service, then return the filtered result """
   query = insert_wikidata_entity(template, entities)
   if print_query:
     print(query)
-  if url != "":
-    response, response_time = get_response_https(query, url)
-  else:
-    response, response_time = get_response_local(query, port)
+  response, response_time = get_response_from_endpoint(query, port, url)
   return filter_response(response, response_time, entities, template_name, result_limit)
 
 def update_df(df, result_dict):
@@ -361,33 +368,36 @@ def update_df(df, result_dict):
 
 def parse_cli_args():
   parser = argparse.ArgumentParser(description=
-    'Test scholias SPARQL templates against Wikidata entities. \
-    By default this script expects a local qlever server at host.docker.internal:7001.\
-    The options --use-qlever-api or --use-wqs-api will instead prompt the official qlever/wqs instance.')
-  parser.add_argument('--entities', type=str, default=None, nargs="+", 
-                      help='Wikidata entity (default: will use internal dict to find a qid that returns a non-empty result)')
-  parser.add_argument('--print-results', action='store_true',
-                      help='Just prints the saved results, without testing any templates')
-  parser.add_argument('--print-query', action='store_true',
-                      help='Prints any query before executing it.')
+    'Test scholias SPARQL templates against Wikidata endpoints. \
+    By default the queries are evaluated by a local endpoint at port: host.docker.internal:7001.\
+    The results are saved in the file: "wikidata_results.pkl" and can be exported to json.\
+    If a query result with the same QIDs, the same endpoint and the same template name is found in the results, it will be skipped.')
+  parser.add_argument('--qids', type=str, default=None, nargs="+", 
+                      help='Wikidata QID(s), that will be filled in to the template(s) (default: will use internal dict to find a qid that returns a non-empty result)')
   parser.add_argument('--templates', type=str, nargs='+', default=None,
-                      help='tests only the given template(s)')
+                      help='Test only the given template(s)')
   parser.add_argument('--exceptions', type=str, nargs='+', default=None,
-                      help='omits the given template(s) from the tests')
-  parser.add_argument('--overwrite-all', action='store_true',
-                      help='Overwrite saved results for this entity instead of skipping')
-  parser.add_argument('--overwrite-error', action='store_true',
-                      help='Overwrite saved results for this entity instead of skipping, but only if the previous status was not "success".')
-  parser.add_argument('--overwrite-success', action='store_true',
-                      help='Overwrite saved results for this entity instead of skipping, but only if the previous status was "success".')
-  parser.add_argument('--save-as-json', action='store_true',
-                      help='Save the results belonging to this wikidata entry in human readable json format.')
-  parser.add_argument('--use-qlever-api', action='store_true',
-                      help='Prompt the qlever api via https instead of the locally running qlever server.')
-  parser.add_argument('--use-wqs-api', action='store_true',
-                      help='Prompt the wqs api via https instead of the locally running qlever server.')
-  parser.add_argument('--port', type=str, default="host.docker.internal:7001",
-                      help='Port where the script can reach a running instance of qlever.')
+                      help='Excepts the given template(s) from the tests')
+  parser.add_argument('--retest-all', action='store_true',
+                      help='Retest queries that otherwise would be skipped')
+  parser.add_argument('--retest-error', action='store_true',
+                      help='Retest saved results instead of skipping, but only if the previous status was not "success"')
+  parser.add_argument('--retest-success', action='store_true',
+                      help='Retest saved results instead of skipping, but only if the previous status was "success"')
+  parser.add_argument('--port', type=str, default=None,
+                      help='Port at which a Wikidata endpoint is up')
+  parser.add_argument('--use-qlever-endpoint', action='store_true',
+                      help='Evaluate the queries with the online endpoint at URL: "https://qlever.dev/api/wikidata?query=" (Qlever endpoint)')
+  parser.add_argument('--use-wqs-endpoint', action='store_true',
+                      help='Evaluate the queries with the online endpoint at URL: "https://query.wikidata.org/sparql" (WQS enpoint)')
+  parser.add_argument('--use-other-online-endpoint', type=str, default=None,
+                      help='URL at which a Wikidata endpoint is up')
+  parser.add_argument('--print-query', action='store_true',
+                      help='Print queries before sending them to the endpoint')
+  parser.add_argument('--print-results', action='store_true',
+                      help='Print the saved results and exit')
+  parser.add_argument('--export-to-json', action='store_true',
+                      help='Export the results to Json and exit')
   
   return parser.parse_args()
 
@@ -395,20 +405,32 @@ def parse_cli_args():
 if __name__ == "__main__":
   # cli parsing
   args = parse_cli_args()
-  entities = args.entities
+  entities = args.qids
   cli_templates = args.templates
   exceptions = args.exceptions
+  overwrite_all = args.retest_all
+  overwrite_error = args.retest_error
+  overwrite_success = args.retest_success
   print_query = args.print_query
-  overwrite_all = args.overwrite_all
-  overwrite_error = args.overwrite_error
-  overwrite_success = args.overwrite_success
-  port = args.port
-  if args.use_qlever_api:
+  
+  # check for conflicting endpoints
+  def check_url(url):
+    if url != "":
+      raise RuntimeError("Exiting because more than one endpoint has been given!")
+    
+  url = ""
+  port = "host.docker.internal:7001"
+  if args.use_qlever_endpoint:
     url = QLEVER_API_URL 
-  elif args.use_wqs_api:
+  if args.use_wqs_endpoint:
+    check_url(url)
     url = WQS_API_URL
-  else:
-     url = ""
+  if args.use_other_online_endpoint is not None:
+    check_url(url)
+    url = args.use_other_online_endpoint
+  if args.port is not None:
+    check_url(url)
+    port = args.port
 
   # load previously saved data
   df = load_or_create_df()
@@ -418,17 +440,18 @@ if __name__ == "__main__":
     print_results(df)
     sys.exit(0)
 
-  # print results to json file (more detailed) and quit
-  if args.save_as_json:
+  # export to Json and quit
+  if args.export_to_json:
     fname = f"{FILE_BASENAME}.json"
     with open(fname, "w") as f:
       json.dump(df_to_dict(df), f, indent=2)
       print(f"Saved information in json format in: {fname}")
     sys.exit(0)
 
-  # find all templates in template dir
+
   templates = list(read_templates_from_template_dir())
 
+  ### main testing loop
   for n_processed, (template_name, template) in enumerate(templates):
     # find proper entities/qids
     if entities is None:
@@ -440,7 +463,7 @@ if __name__ == "__main__":
       print("SKIPPED")
       continue
 
-    result = run_template(template_name, template, entities, port, print_query, url=url, result_limit=1)
+    result = run_template(template_name, template, entities, port, url, print_query, result_limit=1)
     df = update_df(df, result)
     save_df(df)
     print(f"{result['status'].upper()}")
