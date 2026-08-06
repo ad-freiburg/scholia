@@ -19,7 +19,7 @@ CONFIG_FILENAMES = [
 
 DEFAULTS = """
 [query-server]
-sparql_endpoint = https://qlever.dev/api/wikidata
+sparql_endpoint = https://qlever.dev/api/wikidata-scholia
 sparql_editurl = https://wikidata-query-gui.scholia.wiki/#
 sparql_embedurl = https://wikidata-query-gui.scholia.wiki/embed.html#
 sparql_endpoint_name = View in Wikidata Query GUI
